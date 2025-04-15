@@ -4,7 +4,7 @@ import pickle
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from functools import lru_cache
 from itertools import count
 
@@ -28,7 +28,7 @@ def setup_logger(log_dir: Path, name: Optional[str] = None) -> logging.Logger:
         配置好的 logger 对象
     """
     # 创建保存目录（如果不存在）
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(exist_ok=True, parents=True)
 
     # 设置日志文件路径
     log_file = log_dir / "log.log"
@@ -97,10 +97,31 @@ def gaussian_smooth(phi: torch.Tensor, sigma: float = 1.0, kernel_size: int = 5)
     return F.conv3d(padded_phi, kernel).squeeze()
 
 
+def maxpool_smooth(phi: torch.Tensor, kernel_size: int = 5):
+    pad = kernel_size // 2
+    padded_phi = F.pad(phi, pad=(pad, pad, pad, pad, pad, pad), mode="replicate")
+    return F.max_pool3d(padded_phi, kernel_size, stride=1).squeeze()
+
+
 def create_lambda_star_func(t_list, lambda_list):
     assert len(t_list) == len(lambda_list)
     lambda_star_func = interp1d(t_list, lambda_list, kind="linear", bounds_error=True)
     return lambda_star_func
+
+
+def generate_mask_from_func(N, dx: float, f: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    # 生成各维度的中心坐标，形状分别为(N0,), (N1,), (N2,)
+    x_coords = (torch.arange(N[0], dtype=torch.float32) + 0.5) * dx
+    y_coords = (torch.arange(N[1], dtype=torch.float32) + 0.5) * dx
+    z_coords = (torch.arange(N[2], dtype=torch.float32) + 0.5) * dx
+
+    # 生成三维坐标网格，形状均为(N0, N1, N2)
+    grid_x, grid_y, grid_z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
+
+    # 应用判断函数，生成布尔掩码
+    mask = f(grid_x, grid_y, grid_z)
+
+    return mask
 
 
 def generate_interface(phi: torch.Tensor, dx: float, level=0.5, smooth=False):
@@ -122,12 +143,12 @@ def generate_interface(phi: torch.Tensor, dx: float, level=0.5, smooth=False):
     return nodes, faces, interface_type
 
 
-def export_phi(phi: torch.Tensor, save_dir: Path):
+def export_phi(phi: torch.Tensor, save_dir: Path, file_name="phi.npy"):
     save_dir.mkdir(exist_ok=True)
 
     phi = phi.squeeze()
     phi_np = phi.detach().cpu().numpy()  # shape (Nx, Ny, Nz)
-    np.save(save_dir / "phi.npy", phi_np)
+    np.save(save_dir / file_name, phi_np)
 
 
 def export_surface(surface_mask: torch.tensor, dx: float, save_dir: Path):

@@ -12,7 +12,7 @@ import torch.optim
 import matplotlib.pyplot as plt
 
 from utils import *
-from phase_field_model import PhaseFieldModel, dx, compute_lambda, compute_gradient_squared
+from phase_field_model import PhaseFieldModel, dx, compute_lambda, compute_corrected_gradient_squared
 
 L = np.array([70, 70, 70])  # unit: A
 N = np.floor(L / dx).astype(int)
@@ -37,18 +37,13 @@ def create_surface():
 
 
 def create_initial_condition(water_mask):
-    radius = 20  # Angstrom
-    radius_grid = int(radius / dx)
-    center = N // 2
+    def f(x, y, z):
+        return (x >= 15) & (x <= 55) & (y >= 15) & (y <= 55) & (z >= 15) & (z <= 55)
+
+    ice_mask = generate_mask_from_func(N, dx, f)
 
     phi = torch.zeros((1, 1, N[0], N[1], N[2]))
-    x_slice = slice(center[0] - radius_grid, center[0] + radius_grid + 1)
-    y_slice = slice(center[1] - radius_grid, center[1] + radius_grid + 1)
-    z_slice = slice(center[2] - radius_grid, center[2] + radius_grid + 1)
-    phi[..., x_slice, y_slice, z_slice] = 1
-    # phi = 1 - phi
-    # noise = torch.randn_like(phi) * 0.1
-    # phi = torch.clamp(phi + noise, 0, 1)
+    phi[0, 0] = ice_mask
     phi = phi * water_mask
     return phi
 
@@ -65,7 +60,7 @@ def main_run_simulation():
     with torch.no_grad():
         lambda_0 = compute_lambda(phi, water_mask)
 
-    t_list = [0, 1000, 11000, 20000]
+    t_list = [0, 1000, 10000, 10000]
     lambda_list = [lambda_0, lambda_0, lambda_0, lambda_0]
     lambda_star_func = create_lambda_star_func(t_list, lambda_list)
 
@@ -75,16 +70,16 @@ def main_run_simulation():
 
 def main_check_result():
     save_dir = Path("./homogeneous")
+    surface_mask, water_mask, water_surface_mask = create_surface()
     phi_cpu = np.load(save_dir / "phi.npy")
     phi = torch.from_numpy(phi_cpu).unsqueeze(0).unsqueeze(0)
-    grad = compute_gradient_squared(phi)
-    grad_cpu = grad.detach().cpu().numpy()
+    grad = compute_corrected_gradient_squared(phi, water_mask, water_surface_mask)
     print()
 
 
 def main():
-    # main_run_simulation()
-    main_check_result()
+    main_run_simulation()
+    # main_check_result()
 
 
 if __name__ == "__main__":
