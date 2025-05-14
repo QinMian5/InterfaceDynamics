@@ -71,6 +71,12 @@ def setup_logger(log_dir: Path, name: Optional[str] = None) -> logging.Logger:
     return logger
 
 
+def print_memory_mb(tensor: torch.Tensor) -> None:
+    memory_bytes = tensor.numel() * tensor.element_size()
+    memory_mb = memory_bytes / 1024 / 1024
+    print(f"Memory usage: {memory_mb:.2f} MB")
+
+
 @lru_cache(maxsize=10)
 def create_gaussian_kernel(sigma, kernel_size):
     ax = torch.linspace(-(kernel_size // 2), kernel_size // 2, steps=kernel_size)
@@ -94,7 +100,7 @@ def gaussian_smooth(phi: torch.Tensor, sigma: float = 1.0, kernel_size: int = 5)
     # 应用卷积（填充保持尺寸）
     pad = kernel_size // 2
     padded_phi = F.pad(phi, pad=(pad, pad, pad, pad, pad, pad), mode="replicate")
-    return F.conv3d(padded_phi, kernel).squeeze()
+    return F.conv3d(padded_phi, kernel)
 
 
 def maxpool_smooth(phi: torch.Tensor, kernel_size: int = 5):
@@ -146,8 +152,7 @@ def generate_interface(phi: torch.Tensor, dx: float, level=0.5, smooth=False):
 def export_phi(phi: torch.Tensor, save_dir: Path, file_name="phi.npy"):
     save_dir.mkdir(exist_ok=True)
 
-    phi = phi.squeeze()
-    phi_np = phi.detach().cpu().numpy()  # shape (Nx, Ny, Nz)
+    phi_np = phi.detach().cpu().numpy()  # shape (1, 1, Nx, Ny, Nz)
     np.save(save_dir / file_name, phi_np)
 
 

@@ -22,13 +22,13 @@ elif run_env == "mianqin_PC":
 else:
     raise RuntimeError(f"Unknown environment: {run_env}")
 
-rho = 5e4 * 1e-30  # mol/A^3
+rho = 5.09e4 * 1e-30  # mol/A^3
 delta_mu = 0  # J/mol
-gamma_iw = 30.8e-3 * 1e-20  # J/A^2
+gamma_iw = 25.9e-3 * 1e-20  # J/A^2, real water
 
 ksi = 0.25  # unit: A
 dx = 0.5  # unit: A
-K = 3 * gamma_iw * ksi  # J/A
+K = 1 * gamma_iw * ksi  # J/A
 h0 = gamma_iw / (3 * ksi)
 dV = dx ** 3  # unit A^3
 dA = dx ** 2  # unit A^2
@@ -54,22 +54,34 @@ class PhaseFieldModel:
         loss_list = []
         instantaneous_interface_dict = {}
         grad = None
+        grad_max = None
         for t in range(t_total+1):
             if t % 10 == 0:
                 grad = None
-                self.phi.data.copy_(update_surface(self.phi, self.surface_mask, self.water_mask, self.surface_surface_mask, self.water_surface_mask))
+                grad_max = None
+                self.phi_surface_surface = compute_phi_surface_surface(self.phi, self.surface_mask, self.water_mask, self.surface_surface_mask, self.water_surface_mask)
+
             lambda_star = float(lambda_star_func(t))
-            loss, grad = update_phi(self.phi, self.optimizer, self.surface_mask, self.water_mask, self.surface_surface_mask, self.water_surface_mask, lambda_star, self.gamma_is_ws, grad)
+            loss, grad, grad_max = update_phi(self.phi, self.phi_surface_surface, self.optimizer, self.surface_mask, self.water_mask, self.surface_surface_mask, self.water_surface_mask, lambda_star, self.gamma_is_ws, grad, grad_max)
             loss_list.append(loss)
 
             if t % 100 == 0:
                 with torch.no_grad():
                     lambda_ = compute_lambda(self.phi, self.water_mask)
                     phi_cpu = self.phi.detach().cpu().numpy()
-                    grad_term = compute_corrected_gradient_squared(self.phi, self.water_mask)
+                    # grad_term = compute_corrected_gradient_squared(self.phi, self.water_mask)
+                    grad_term = grad
                     grad_term_cpu = grad_term.detach().cpu().numpy()
                 info_message = f"t: {t:{n_digits}d}/{t_total}, loss: {loss:.2f}, lambda: {lambda_:.1f}, lambda_star: {lambda_star:.1f}"
                 logger.info(info_message)
+
+                if device == "cuda":
+                    memory_allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                    memory_reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                    max_memory_allocated = torch.cuda.max_memory_allocated() / 1024 ** 2
+
+                    debug_message = f"Memory allocated: {memory_allocated:.2f} MB, Memory reserved: {memory_reserved:.2f} MB, Max memory allocated: {max_memory_allocated:.2f} MB"
+                    logger.debug(debug_message)
 
                 hist, bin_edges = np.histogram(phi_cpu, bins=10, range=(0, 1))
                 debug_message = "Histogram of phi:"
@@ -103,40 +115,43 @@ def compute_bulk_energy(phi: torch.Tensor, water_mask: torch.Tensor):
     return bulk_energy
 
 
-def compute_gradient(phi: torch.Tensor):
-    # central difference
-    # padded_phi = F.pad(phi, pad=(2, 2, 2, 2, 2, 2), mode='circular')
-    # grad_padded_phi = torch.gradient(padded_phi, spacing=dx, edge_order=1, dim=(2, 3, 4))
-    # grad_component_central = [g[..., 2:-2, 2:-2, 2:-2] for g in grad_padded_phi]
-    #
-    # # forward and backward difference
-    # grad_component_forward = []
-    # grad_component_backward = []
-    # for dim in [2, 3, 4]:
-    #     forward_phi = torch.roll(phi, shifts=-1, dims=dim)
-    #     forward_grad = (forward_phi - phi) / dx
-    #     grad_component_forward.append(forward_grad)
-    #     backward_phi = torch.roll(phi, shifts=+1, dims=dim)
-    #     backward_grad = (phi - backward_phi) / dx
-    #     grad_component_backward.append(backward_grad)
+_kernel_dict = {}
 
-    # fourth order
-    kernel_1d = torch.tensor([1/12, -2/3, 0, 2/3, -1/12], dtype=phi.dtype, device=phi.device)
 
-    kernel_x = kernel_1d.view(1, 1, 5, 1, 1)
-    padded_phi_x = F.pad(phi, pad=(0, 0, 0, 0, 2, 2), mode='circular')
-    grad_x = F.conv3d(padded_phi_x, kernel_x) / dx
+def compute_gradient(phi: torch.Tensor, direction="xyz"):
+    key = (phi.dtype, phi.device)
 
-    kernel_y = kernel_1d.view(1, 1, 1, 5, 1)
-    padded_phi_y = F.pad(phi, pad=(0, 0, 2, 2, 0, 0), mode='circular')
-    grad_y = F.conv3d(padded_phi_y, kernel_y) / dx
+    if key not in _kernel_dict:
+        # fourth order
+        kernel_1d = torch.tensor([1/12, -2/3, 0, 2/3, -1/12], dtype=phi.dtype, device=phi.device)
+        kernels = {"x": kernel_1d.view(1, 1, 5, 1, 1),
+                  "y": kernel_1d.view(1, 1, 1, 5, 1),
+                  "z": kernel_1d.view(1, 1, 1, 1, 5)}
+        _kernel_dict[key] = kernels
 
-    kernel_z = kernel_1d.view(1, 1, 1, 1, 5)
-    padded_phi_z = F.pad(phi, pad=(2, 2, 0, 0, 0, 0), mode='circular')
-    grad_z = F.conv3d(padded_phi_z, kernel_z) / dx
+    kernels = _kernel_dict[key]
 
-    grad_component_4th_order = [grad_x, grad_y, grad_z]
-    return grad_component_4th_order
+    grad_component_4th_order = []
+    if "x" in direction:
+        kernel_x = kernels["x"]
+        padded_phi_x = F.pad(phi, pad=(0, 0, 0, 0, 2, 2), mode='circular')
+        grad_x = F.conv3d(padded_phi_x, kernel_x) / dx
+        grad_component_4th_order.append(grad_x)
+    if "y" in direction:
+        kernel_y = kernels["y"]
+        padded_phi_y = F.pad(phi, pad=(0, 0, 2, 2, 0, 0), mode='circular')
+        grad_y = F.conv3d(padded_phi_y, kernel_y) / dx
+        grad_component_4th_order.append(grad_y)
+    if "z" in direction:
+        kernel_z = kernels["z"]
+        padded_phi_z = F.pad(phi, pad=(2, 2, 0, 0, 0, 0), mode='circular')
+        grad_z = F.conv3d(padded_phi_z, kernel_z) / dx
+        grad_component_4th_order.append(grad_z)
+
+    if len(direction) == 1:
+        return grad_component_4th_order[0]
+    else:
+        return grad_component_4th_order
 
 
 def compute_gradient_squared(phi: torch.Tensor):
@@ -158,9 +173,10 @@ def compute_corrected_gradient_squared(phi: torch.Tensor, water_mask: torch.Tens
     return corrected_gradient_squared
 
 
-def compute_surface_energy_iw(phi: torch.Tensor, water_mask: torch.Tensor):
+def compute_surface_energy_iw(phi: torch.Tensor, water_mask: torch.Tensor, water_surface_mask: torch.Tensor):
     grad_term = compute_corrected_gradient_squared(phi, water_mask)
 
+    # bulk_mask = water_mask - water_surface_mask
     bulk_mask = water_mask
     surface_energy_iw = torch.sum((K * grad_term) * bulk_mask)
     return surface_energy_iw, grad_term.detach()
@@ -188,11 +204,18 @@ def compute_double_well_energy(phi: torch.Tensor, water_mask: torch.Tensor):
 def compute_total_energy(phi: torch.Tensor, surface_mask: torch.Tensor, water_mask: torch.Tensor, water_surface_mask: torch.Tensor, gamma_is_ws):
     surface_energy_scale = 3.0
     bulk_energy = compute_bulk_energy(phi, water_mask)
-    surface_energy_iw, grad_term = compute_surface_energy_iw(phi, water_mask)
+    surface_energy_iw, grad_term = compute_surface_energy_iw(phi, water_mask, water_surface_mask)
     surface_energy_is = compute_surface_energy_is(phi, water_surface_mask, gamma_is_ws)
     double_well_energy = compute_double_well_energy(phi, water_mask)
     total_energy = bulk_energy + (surface_energy_iw + surface_energy_is) * surface_energy_scale + double_well_energy
-    return total_energy, grad_term
+    info = {
+        "bulk_energy": bulk_energy.item(),
+        "surface_energy_iw": surface_energy_iw.item(),
+        "surface_energy_is": surface_energy_is.item(),
+        "double_well_energy": double_well_energy.item(),
+        "total_energy": total_energy.item()
+    }
+    return total_energy, grad_term, info
 
 
 def compute_lambda(phi: torch.Tensor, water_mask: torch.Tensor):
@@ -210,25 +233,57 @@ def compute_bias_potential(phi, water_mask, lambda_star):
     return bias_potential
 
 
-def compute_mean_curvature(phi: torch.Tensor, water_mask: torch.Tensor):
-    ...
+def compute_mean_curvature(phi: torch.Tensor, phi_surface_surface: torch.Tensor, water_mask: torch.Tensor, bulk_mask: torch.Tensor, epsilon=1e-10):
+    phi = gaussian_smooth(phi + phi_surface_surface) * water_mask
+    grad_x, grad_y, grad_z = compute_gradient(phi + phi_surface_surface)
+    grad_norm = torch.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+
+    grad_xx, grad_xy, grad_xz = compute_gradient(grad_x)
+    grad_yy, grad_yz = compute_gradient(grad_y, direction="yz")
+    grad_zz = compute_gradient(grad_z, direction="z")
+
+    numerator = (
+        grad_x ** 2 * (grad_yy + grad_zz) +
+        grad_y ** 2 * (grad_xx + grad_zz) +
+        grad_z ** 2 * (grad_xx + grad_yy) -
+        2 * grad_x * grad_y * grad_xy -
+        2 * grad_x * grad_z * grad_xz -
+        2 * grad_y * grad_z * grad_yz
+    )
+    denominator = 2 * (grad_norm ** 3 + epsilon)
+
+    interface_mask = grad_norm > 0.12
+    H = (numerator / denominator) * bulk_mask * interface_mask
+    valid_H = H[interface_mask]
+    valid_H_1percentile = torch.quantile(valid_H, 0.01)
+    valid_H_99percentile = torch.quantile(valid_H, 0.99)
+    filtered_H = valid_H[(valid_H > valid_H_1percentile) & (valid_H < valid_H_99percentile)]
+
+    H_mean = torch.mean(filtered_H)
+    H_std = torch.std(filtered_H)
+
+    # phi_cpu = phi.cpu()
+    # total_phi_cpu = (phi + phi_surface_surface).cpu()
+    # grad_norm_cpu = grad_norm.cpu()
+    # H_cpu = H.cpu()
+    # filtered_H_cpu = filtered_H.cpu()
+    return H, H_mean, H_std
 
 
-def update_surface(phi, surface_mask, water_mask, surface_surface_mask, water_surface_mask):
-    phi_water = phi * water_mask
-    padded_phi = F.pad(phi_water, (2, 2, 2, 2, 2, 2), 'circular')
+@torch.no_grad()
+def compute_phi_surface_surface(phi, surface_mask, water_mask, surface_surface_mask, water_surface_mask):
+    padded_phi = F.pad(phi, (2, 2, 2, 2, 2, 2), 'circular')
     padded_water_mask = F.pad(water_mask, (2, 2, 2, 2, 2, 2), 'circular')
     kernel = torch.ones((1, 1, 5, 5, 5), dtype=phi.dtype, device=phi.device)
     N_neighbor = torch.clamp(F.conv3d(padded_water_mask, kernel) * surface_surface_mask, min=1)
     phi_neighbor = F.conv3d(padded_phi, kernel) * surface_surface_mask
     phi_surface_surface = phi_neighbor / N_neighbor
-    new_phi = phi_water + phi_surface_surface
-    return new_phi
+    return phi_surface_surface
 
 
-def update_phi(phi: torch.Tensor, optimizer, surface_mask, water_mask, surface_surface_mask, water_surface_mask, lambda_star, gamma_is_ws, grad=None):
-    bias_potential = compute_bias_potential(phi, water_mask, lambda_star)
-    total_energy, grad_term = compute_total_energy(phi, surface_mask, water_mask, water_surface_mask, gamma_is_ws)
+def update_phi(phi: torch.Tensor, phi_surface_surface: torch.Tensor, optimizer, surface_mask, water_mask, surface_surface_mask, water_surface_mask, lambda_star, gamma_is_ws, grad=None, grad_max=None):
+    bias_potential = compute_bias_potential(phi + phi_surface_surface, water_mask, lambda_star)
+    total_energy, grad_term, info = compute_total_energy(phi + phi_surface_surface, surface_mask, water_mask, water_surface_mask, gamma_is_ws)
 
     loss = (bias_potential + total_energy) * 1e20
 
@@ -238,10 +293,9 @@ def update_phi(phi: torch.Tensor, optimizer, surface_mask, water_mask, surface_s
         if grad is None:
         # grad = compute_corrected_gradient_squared(phi, water_mask)
             grad = gaussian_smooth(grad_term, sigma=5)
-            # grad = maxpool_smooth(grad_term)
-        # grad = grad_term
-        grad_max = torch.quantile(grad, 0.995)
+            grad_max = grad.max()
         grad_scale = grad / max(grad_max, 1e-5)
+        # grad_scale = grad
         grad_scale[grad_scale > 0.2] = 1
         phi.grad.data.mul_(grad_scale * water_mask)
         # print(phi.grad.data.max())
@@ -249,7 +303,7 @@ def update_phi(phi: torch.Tensor, optimizer, surface_mask, water_mask, surface_s
     optimizer.step()
     with torch.no_grad():
         phi.data.clamp_(0, 1)
-    return loss.item(), grad
+    return loss.item(), grad, grad_max
 
 
 def main():
