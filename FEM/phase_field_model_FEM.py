@@ -497,7 +497,7 @@ def main():
     parser.add_argument("--t_eql_prd", default=5000, type=float)
     parser.add_argument("--r_initial", default=40, type=float)
     parser.add_argument("--lambda_0", default=None, type=float)
-    parser.add_argument("--lambda-star", default=None, type=float)
+    parser.add_argument("--lambda_star", default=None, type=float)
     parser.add_argument("--x_offset", default=0, type=float)
     args, remaining_args = parser.parse_known_args()
 
