@@ -21,52 +21,11 @@ import scipy.constants as const
 import pandas as pd
 
 from scifem import create_real_functionspace
+import adios4dolfinx
 
-from utils import create_lambda_star_func, setup_logger
-
+from utils_FEM import create_lambda_star_func, setup_logger
 
 ksi = 4.0
-
-
-class MomentumOptimizer:
-    def __init__(self, beta1=0.9, epsilon=1e-8):
-        self.beta1 = beta1
-        self.epsilon = epsilon
-        self.m = None  # 一阶矩（动量）
-        self.t = 0  # 时间步
-
-    def __call__(self, *args, **kwargs):
-        return self.step(*args, **kwargs)
-
-    def step(self, grads):
-        """
-        输入当前梯度，返回 Adam 更新量，并更新内部状态
-        Args:
-            grads: 当前梯度（NumPy 数组）
-        Returns:
-            更新量（与 grads 同形状的 NumPy 数组）
-        """
-        # 初始化状态（第一次调用时）
-        if self.m is None:
-            self.m = np.zeros_like(grads)
-
-        self.t += 1  # 更新时间步
-
-        # 更新一阶矩和二阶矩
-        self.m = self.beta1 * self.m + (1 - self.beta1) * grads
-
-        # 偏差修正
-        m_hat = self.m / (1 - self.beta1 ** self.t)
-
-        # 计算更新量
-        update = m_hat
-        return update
-
-    def reset(self):
-        """重置优化器状态（用于重新训练时）"""
-        self.m = None
-        self.v = None
-        self.t = 0
 
 
 class GaussianSmoother:
@@ -106,6 +65,12 @@ def clip_petsc_vec(vec, min_val=0.0, max_val=1.0):
     arr[arr < min_val] = min_val
     vec.setArray(arr)
     vec.ghostUpdate()
+
+
+def eliminate_small_values(function: fem.Function, threshold_low=0.05, threshold_high=0.95):
+    array = function.x.array
+    array[array < threshold_low] = 0
+    array[array > threshold_high] = 1
 
 
 def compute_form(domain, form: ufl.Form):
@@ -237,24 +202,20 @@ def create_lambda_star_func_with_steps(lambda_0, lambda_star, ramp_rate, t_eql_i
     return lambda_star_func, t_total
 
 
-def main_PFM(system, theta: str, path_mesh, save_dir):
+def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lambda_step, t_eql_ramp, t_eql_prd,
+             r_initial, lambda_0, lambda_star, x_offset, if_continue=False):
     logger = setup_logger(save_dir)
     # logger.info = print
 
     trajectory_save_dir = save_dir / "trajectory"
     trajectory_save_dir.mkdir(exist_ok=True)
-
-    t_eql_init = 5000
-    ramp_rate = 1
-    lambda_step = 100
-    t_eql_ramp = 0
-    t_eql_prd = 2000
-
-    r_initial = 35
-    lambda_star = 3000
+    phi_checkpoint_save_path = trajectory_save_dir / "phi_checkpoint.bp"
+    phi_xdmf_save_path = trajectory_save_dir / "phi.xdmf"
+    grad_phi_xdmf_save_path = trajectory_save_dir / "phi_grad.xdmf"
+    intermediate_result_save_path = save_dir / "intermediate_result.csv"
+    instantaneous_interface_save_path = save_dir / "instantaneous_interface.pickle"
 
     # 梯度下降参数
-    optimizer = MomentumOptimizer()
     learning_rate_phi = 0.01
     learning_rate_l = 1e-7
     tolerance = 1e-10
@@ -356,26 +317,67 @@ def main_PFM(system, theta: str, path_mesh, save_dir):
     phi = fem.Function(V)
     l = fem.Function(R)
     current_lambda_star = fem.Function(R)
-    x = ufl.SpatialCoordinate(domain_water)
-    cos_theta = np.cos(np.radians(float(theta)))
-    # cos_theta = np.cos(np.radians(float(90)))
-    r_squared = (x[0] - 1) ** 2 + (x[1] - 0) ** 2 + (x[2] - (1 - r_initial * cos_theta)) ** 2
-    condition = ufl.conditional(r_squared <= r_initial ** 2, 1.0, 0.0)
-    phi.interpolate(fem.Expression(condition, V.element.interpolation_points()))
 
-    gaussian_smoother = GaussianSmoother(phi, ksi/4, V, domain_water)
+    if if_continue:
+        with open(instantaneous_interface_save_path, "rb") as file:
+            instantaneous_interface_dict = pickle.load(file)
+        df_intermediate_result = pd.read_csv(intermediate_result_save_path, index_col=0)
+        l.x.array[:] = df_intermediate_result.iloc[-1]["l"]
+        last_t = df_intermediate_result.iloc[-1]["t"]
+        adios4dolfinx.read_function(phi_checkpoint_save_path, phi)
+        intermediate_result_list = df_intermediate_result.to_dict("records")
+    else:
+        x = ufl.SpatialCoordinate(domain_water)
+        cos_theta = np.cos(np.radians(float(theta)))
+        if lambda_0 is None:  # Use r_initial
+            r_squared = (ufl.sqrt((x[0] - x_offset) ** 2 + (x[1] - 0) ** 2) - 0) ** 2 + (
+                    x[2] - (1 - r_initial * cos_theta)) ** 2
+            condition = ufl.conditional(r_squared <= r_initial ** 2, 1.0, 0.0)
+            phi.interpolate(fem.Expression(condition, V.element.interpolation_points()))
+        else:  # Find r_initial so that lambda is close to lambda_0
+            current_r = r_initial
+            r_step = 2
+            r_squared = (ufl.sqrt((x[0] - x_offset) ** 2 + (x[1] - 0) ** 2) - 0) ** 2 + (
+                    x[2] - (1 - current_r * cos_theta)) ** 2
+            condition = ufl.conditional(r_squared <= current_r ** 2, 1.0, 0.0)
+            phi.interpolate(fem.Expression(condition, V.element.interpolation_points()))
+            current_lambda = compute_volume(domain_water, phi) * rho
+            if abs(current_lambda - lambda_0) > 100:
+                direction = 1 if current_lambda < lambda_0 else -1
+                for i in range(100):  # Maximum 100 loops
+                    current_r = current_r + direction * r_step
+                    r_squared = (ufl.sqrt((x[0] - x_offset) ** 2 + (x[1] - 0) ** 2) - 0) ** 2 + (
+                            x[2] - (1 - current_r * cos_theta)) ** 2
+                    condition = ufl.conditional(r_squared <= current_r ** 2, 1.0, 0.0)
+                    phi.interpolate(fem.Expression(condition, V.element.interpolation_points()))
+                    current_lambda = compute_volume(domain_water, phi) * rho
+                    if abs(current_lambda - lambda_0) < 100:
+                        logger.info(f"Using r_initial = {current_r}")
+                        break
+                    new_direction = 1 if current_lambda < lambda_0 else -1
+                    if new_direction != direction:
+                        r_step = r_step / 2
+                else:
+                    logger.error("Cannot find r_initial to get lambda_0")
+                    raise RuntimeError("Cannot find r_initial to get lambda_0")
+        instantaneous_interface_dict = {}
+        last_t = -1
+        intermediate_result_list = []
+        with (XDMFFile(MPI.COMM_WORLD, phi_xdmf_save_path, "w") as phi_xdmf,
+              XDMFFile(MPI.COMM_WORLD, grad_phi_xdmf_save_path, "w") as grad_phi_xdmf):
+            phi_xdmf.write_mesh(domain_water)
+            grad_phi_xdmf.write_mesh(domain_water)
+
+    gaussian_smoother = GaussianSmoother(phi, ksi / 4, V, domain_water)
 
     lambda_0 = compute_volume(domain_water, phi) * rho
     current_lambda_star.x.array[0] = lambda_0
 
-    # t_ramp = int(abs(lambda_0 - lambda_star) / ramp_rate)
-    # t_list = list(accumulate([0, t_eql_init, t_ramp, t_eql_prd]))
-    t_list = list(accumulate([0, t_eql_init, 0, 0]))
-    t_total = t_list[-1]
-    lambda_list = [lambda_0, lambda_0, lambda_star, lambda_star]
-    lambda_star_func = create_lambda_star_func(t_list, lambda_list)
-    # lambda_star_func, t_total = create_lambda_star_func_with_steps(lambda_0, lambda_star, ramp_rate, t_eql_init, lambda_step, t_eql_ramp, t_eql_prd)
-    logger.info(f"lambda: {lambda_star_func(0):.0f} -> {lambda_star_func(t_total-0.1):.0f}, t_total: {t_total:.0f}")
+    if lambda_star is None:
+        lambda_star = lambda_0
+    lambda_star_func, t_total = create_lambda_star_func_with_steps(lambda_0, lambda_star, ramp_rate, t_eql_init,
+                                                                   lambda_step, t_eql_ramp, t_eql_prd)
+    logger.info(f"lambda: {lambda_star_func(0):.0f} -> {lambda_star_func(t_total - 0.1):.0f}, t_total: {t_total:.0f}")
     # input("Press Enter to continue.")
 
     dphi = ufl.TestFunction(V)
@@ -406,114 +408,126 @@ def main_PFM(system, theta: str, path_mesh, save_dir):
     grad_phi_magnitude = fem.Function(V)
     grad_phi_magnitude_expr = fem.Expression(ufl.sqrt(ufl.dot(ufl.grad(phi), ufl.grad(phi))),
                                              V.element.interpolation_points())
-    instantaneous_interface_dict = {}
-    data = []
-    for t in range(int(t_total)+1):
-        if t % 100 == 0:
-            gaussian_smoother.step()
-        lambda_star = lambda_star_func(t)
-        current_lambda_star.x.array[0] = lambda_star
-        # 组装梯度
-        with gradient_phi_vec.localForm() as loc_g:
-            loc_g.set(0.0)
-        fem.petsc.assemble_vector(gradient_phi_vec, dphi_form)
-        gradient_phi_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
 
-        grad_phi_magnitude.interpolate(grad_phi_magnitude_expr)
-        with gradient_phi_vec.localForm() as loc_g, grad_phi_magnitude.x.petsc_vec.localForm() as loc_grad_mag:
-            # 避免除以零，加一个小常数
-            scaling_factor = loc_grad_mag.array / (loc_grad_mag.array.max() + 1e-10)
-            scaling_factor[scaling_factor >= 0.2] = 1
-            loc_g.array *= scaling_factor
+    t_start = last_t + 1
+    with (XDMFFile(MPI.COMM_WORLD, phi_xdmf_save_path, "a") as phi_xdmf,
+          XDMFFile(MPI.COMM_WORLD, grad_phi_xdmf_save_path, "a") as grad_phi_xdmf):
+        for t in range(t_start, t_start + int(t_total) + 1):
+            if t % 100 == 0:
+                gaussian_smoother.step()
+                eliminate_small_values(phi)
+            lambda_star = lambda_star_func(t)
+            current_lambda_star.x.array[0] = lambda_star
+            # 组装梯度
+            with gradient_phi_vec.localForm() as loc_g:
+                loc_g.set(0.0)
+            fem.petsc.assemble_vector(gradient_phi_vec, dphi_form)
+            gradient_phi_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
 
-        with gradient_l_vec.localForm() as loc_g:
-            loc_g.set(0.0)
-        fem.petsc.assemble_vector(gradient_l_vec, dl_form)
-        gradient_l_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+            grad_phi_magnitude.interpolate(grad_phi_magnitude_expr)
+            with gradient_phi_vec.localForm() as loc_g, grad_phi_magnitude.x.petsc_vec.localForm() as loc_grad_mag:
+                # 避免除以零，加一个小常数
+                scaling_factor = loc_grad_mag.array / (loc_grad_mag.array.max() + 1e-10)
+                scaling_factor[scaling_factor >= 0.2] = 1
+                loc_g.array *= scaling_factor
 
-        phi.x.petsc_vec.axpy(-learning_rate_phi, gradient_phi_vec)
-        l.x.petsc_vec.axpy(learning_rate_l, gradient_l_vec)
-        # l.x.array[0] += learning_rate_l * optimizer(gradient_l_vec.array)
-        # print(compute_volume(domain_water, phi) * rho)
-        clip_petsc_vec(phi.x.petsc_vec, 0, 1)
-        for bc in bcs:
-            bc.set(phi.x.array, alpha=1.0)
+            with gradient_l_vec.localForm() as loc_g:
+                loc_g.set(0.0)
+            fem.petsc.assemble_vector(gradient_l_vec, dl_form)
+            gradient_l_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
 
-        if t % 100 == 0:
-            current_lambda = compute_volume(domain_water, phi) * rho
-            logger.info(f"Iteration {t}/{t_total:.0f}, lambda: {current_lambda:.0f}, lambda_star: {lambda_star:.0f}")
-            surface_energy_iw = compute_form(domain_water, compute_surface_energy_iw_form(phi, gamma_iw))
-            surface_energy_is_ws = compute_form(domain_water, compute_surface_energy_is_form(phi, gamma_is_ws))
-            double_well_energy_bulk = compute_form(domain_water, compute_double_well_energy_bulk_form(phi, gamma_iw, gamma_is_ws))
-            double_well_energy_surface = compute_form(domain_water, compute_double_well_energy_surface_form(phi, gamma_iw, gamma_is_ws))
-            total_energy = surface_energy_iw + surface_energy_is_ws + double_well_energy_bulk + double_well_energy_surface
-            logger.info(f"Surface Energy iw: {energy_scale * surface_energy_iw:.2f}, Surface Energy is: {energy_scale * surface_energy_is_ws:.2f}, Double Well Energy (Bulk, Surface): ({energy_scale * double_well_energy_bulk:.2f}, {energy_scale * double_well_energy_surface:.2f})")
-            info = {
-                "t": t,
-                "lambda": current_lambda,
-                "lambda_star": lambda_star,
-                "total_energy": total_energy,
-                "surface_energy_iw": surface_energy_iw,
-                "surface_energy_is_ws": surface_energy_is_ws,
-                "double_well_energy_bulk": double_well_energy_bulk,
-                "double_well_energy_surface": double_well_energy_surface,
-                "bulk_energy": 0.0
-            }
-            # print(l.x.array, gradient_l.x.array)
-            # print(phi.x.array.min(), phi.x.array.max())
-            data.append(info)
-            nodes, faces, interface_type = generate_interface(V, phi)
-            instantaneous_interface_dict[f"{t}"] = [nodes, faces, interface_type]
+            phi.x.petsc_vec.axpy(-learning_rate_phi, gradient_phi_vec)
+            l.x.petsc_vec.axpy(learning_rate_l, gradient_l_vec)
+            clip_petsc_vec(phi.x.petsc_vec, 0, 1)
+            for bc in bcs:
+                bc.set(phi.x.array, alpha=1.0)
 
-            with XDMFFile(MPI.COMM_WORLD, trajectory_save_dir / f"{t:05d}.xdmf", "w") as xdmf:
-                xdmf.write_mesh(domain_water)
-                xdmf.write_function(phi)
-            with open(trajectory_save_dir / f"{t:05d}_l.txt", "w") as file:
-                file.write(f"{l.x.array[0]}")
-            with XDMFFile(MPI.COMM_WORLD, trajectory_save_dir / f"{t:05d}_grad.xdmf", "w") as xdmf:
-                xdmf.write_mesh(domain_water)
-                xdmf.write_function(grad_phi_magnitude)
+            if t % 100 == 0:
+                current_lambda = compute_volume(domain_water, phi) * rho
+                logger.info(
+                    f"Iteration {t}/{t_start + t_total:.0f}, lambda: {current_lambda:.0f}, lambda_star: {lambda_star:.0f}")
+                surface_energy_iw = compute_form(domain_water, compute_surface_energy_iw_form(phi, gamma_iw))
+                surface_energy_is_ws = compute_form(domain_water, compute_surface_energy_is_form(phi, gamma_is_ws))
+                double_well_energy_bulk = compute_form(domain_water,
+                                                       compute_double_well_energy_bulk_form(phi, gamma_iw, gamma_is_ws))
+                double_well_energy_surface = compute_form(domain_water,
+                                                          compute_double_well_energy_surface_form(phi, gamma_iw,
+                                                                                                  gamma_is_ws))
+                total_energy = surface_energy_iw + surface_energy_is_ws + double_well_energy_bulk + double_well_energy_surface
+                logger.info(
+                    f"Surface Energy iw: {energy_scale * surface_energy_iw:.2f}, Surface Energy is: {energy_scale * surface_energy_is_ws:.2f}, Double Well Energy (Bulk, Surface): ({energy_scale * double_well_energy_bulk:.2f}, {energy_scale * double_well_energy_surface:.2f})")
+                info = {
+                    "t": t,
+                    "lambda": current_lambda,
+                    "lambda_star": lambda_star,
+                    "total_energy": total_energy,
+                    "surface_energy_iw": surface_energy_iw,
+                    "surface_energy_is_ws": surface_energy_is_ws,
+                    "double_well_energy_bulk": double_well_energy_bulk,
+                    "double_well_energy_surface": double_well_energy_surface,
+                    "bulk_energy": 0.0,
+                    "l": l.x.array[0],
+                }
+                # print(l.x.array, gradient_l.x.array)
+                # print(phi.x.array.min(), phi.x.array.max())
+                intermediate_result_list.append(info)
+                nodes, faces, interface_type = generate_interface(V, phi)
+                instantaneous_interface_dict[f"{t}"] = [nodes, faces, interface_type]
 
-    df = pd.DataFrame(data)
-    df.to_csv(save_dir / "intermediate_result.csv", index=False)
-    with XDMFFile(MPI.COMM_WORLD, "solution.xdmf", "w") as xdmf:
-        xdmf.write_mesh(domain_water)
-        xdmf.write_function(phi)
-    with open(save_dir / "instantaneous_interface.pickle", "wb") as file:
+                phi_xdmf.write_function(phi, t=t)
+                grad_phi_xdmf.write_function(grad_phi_magnitude, t=t)
+
+    adios4dolfinx.write_function(phi_checkpoint_save_path, phi)
+
+    df = pd.DataFrame(intermediate_result_list)
+    df.to_csv(intermediate_result_save_path)
+    with open(instantaneous_interface_save_path, "wb") as file:
         pickle.dump(instantaneous_interface_dict, file)
 
 
 def main():
-    # parser = argparse.ArgumentParser(description="Control the program functions.")
-    # parser.add_argument("--system", required=True, choices=["flat", "pillar"])
-    # parser.add_argument("--theta", required=True)
-    # args, remaining_args = parser.parse_known_args()
-    #
-    # if args.system == "pillar":
-    #     parser.add_argument("--pillar_r", required=True,
-    #                         help="Pillar radius (required when system is 'pillar')")
-    #     args = parser.parse_args()
-    # else:
-    #     args = parser.parse_args(remaining_args)
-    # system = args.system
-    # theta = args.theta
+    parser = argparse.ArgumentParser(description="Control the program functions.")
+    parser.add_argument("--system", default="pillar", choices=["flat", "pillar"])
+    parser.add_argument("--theta", default="60")
+    parser.add_argument("--job_name", default="test")
+    parser.add_argument("--t_eql_init", default=5000, type=float)
+    parser.add_argument("--ramp_rate", default=0.25, type=float)
+    parser.add_argument("--lambda_step", default=100, type=float)
+    parser.add_argument("--t_eql_ramp", default=0, type=float)
+    parser.add_argument("--t_eql_prd", default=5000, type=float)
+    parser.add_argument("--r_initial", default=40, type=float)
+    parser.add_argument("--lambda_0", default=None, type=float)
+    parser.add_argument("--lambda-star", default=None, type=float)
+    parser.add_argument("--x_offset", default=0, type=float)
+    args, remaining_args = parser.parse_known_args()
 
-    root_dir = Path("./FEM")
+    if args.system == "pillar":
+        parser.add_argument("--r_pillar", default=10,
+                            help="Pillar radius (required when system is 'pillar')")
+        parser.add_argument("--asymmetric", action="store_true")
+        args = parser.parse_args()
+    else:
+        args = parser.parse_args(remaining_args)
+
+    system = args.system
+    theta = args.theta
+    job_name = args.job_name
+
+    root_dir = Path("../FEM")
     root_dir.mkdir(exist_ok=True)
-    system = "pillar"
-    theta = "60"
-    r_pillar = 10
-
     if system == "pillar":
-        path_mesh = Path(f"./mesh/pillar_system/{r_pillar}/{theta}.msh")
-        save_dir = root_dir / "pillar" / f"{theta}"
+        r_pillar = args.r_pillar
+        mesh_filename = f"{theta}_asym.msh" if args.asymmetric else f"{theta}.msh"
+        path_mesh = Path(f"../mesh/pillar_system/{r_pillar}/{mesh_filename}")
+        save_dir = root_dir / "pillar" / f"{theta}" / job_name
     elif system == "flat":
-        path_mesh = Path(f"./mesh/flat_surface/{theta}.msh")
-        save_dir = root_dir / "flat" / f"{theta}"
+        path_mesh = Path(f"../mesh/flat_surface/{theta}.msh")
+        save_dir = root_dir / "flat" / f"{theta}" / job_name
     else:
         raise ValueError(f"System {system} not supported")
     save_dir.mkdir(exist_ok=True, parents=True)
-    main_PFM(system, theta, path_mesh, save_dir)
+    main_PFM(system, theta, path_mesh, save_dir, args.t_eql_init, args.ramp_rate, args.lambda_step, args.t_eql_ramp,
+             args.t_eql_prd, args.r_initial, args.lambda_0, args.lambda_star, args.x_offset)
 
 
 if __name__ == "__main__":

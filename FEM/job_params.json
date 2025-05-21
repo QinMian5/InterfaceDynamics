@@ -1,0 +1,128 @@
+[
+	{
+		"SYSTEM": "flat",
+		"THETA": "45",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "60",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "70",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "80",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "90",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "120",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "flat",
+		"THETA": "150",
+		"JOB_NAME": "l1000_to_l3000",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "45",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "60",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "70",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "80",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "90",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "120",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "150",
+		"JOB_NAME": "l1000_to_l3000_sym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "45",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 40"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "60",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 35"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "70",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 30"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "80",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 30"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "90",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 30"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "120",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 25"
+	},
+	{
+		"SYSTEM": "pillar",
+		"THETA": "150",
+		"JOB_NAME": "l1000_to_l3000_asym",
+		"EXTRA_COMMANDS": "--lambda_0 1000 --lambda_star 3000 --asymmetric --x_offset 25"
+	}
+]

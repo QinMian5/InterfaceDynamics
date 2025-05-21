@@ -7,7 +7,7 @@ import gmsh
 import pyvista
 from dolfinx.io import gmshio, XDMFFile
 from mpi4py import MPI
-
+from torch.distributions.constraints import symmetric
 
 parameters_flat_surface = {
     "45": [70, 40],
@@ -91,7 +91,7 @@ parameters_pillar = {
 }
 
 
-def main_generate_mesh_pillar(theta: str, r_pillar: float, visualization=False):
+def main_generate_mesh_pillar(theta: str, r_pillar: float, symmetric=True, visualization=False):
     root_dir = Path("./mesh/pillar_system")
     root_dir.mkdir(exist_ok=True)
     save_dir = root_dir / f"{r_pillar}"
@@ -103,6 +103,7 @@ def main_generate_mesh_pillar(theta: str, r_pillar: float, visualization=False):
     r_box, z_box = parameters_pillar[theta]
     z_plane = 1
     z_pillar = z_box - 1
+    x_cylinder = 0 if symmetric else r_box - r_pillar - 10
 
     # Create model
     model = gmsh.model()
@@ -110,7 +111,7 @@ def main_generate_mesh_pillar(theta: str, r_pillar: float, visualization=False):
     model.setCurrent(name)
 
     box_tags = model.occ.addCylinder(0, 0, 0, 0, 0, z_box, r_box)
-    cylinder_tags = model.occ.addCylinder(0, 0, 0, 0, 0, z_pillar, r_pillar)
+    cylinder_tags = model.occ.addCylinder(x_cylinder, 0, 0, 0, 0, z_pillar, r_pillar)
     plane_tags = model.occ.addCylinder(0, 0, 0, 0, 0, z_plane, r_box)
 
     surface_region_dim_tags, _ = model.occ.fuse([(3, cylinder_tags)], [(3, plane_tags)])
@@ -146,7 +147,11 @@ def main_generate_mesh_pillar(theta: str, r_pillar: float, visualization=False):
     # gmsh.option.setNumber("Mesh.QualityType", 2)  # 基于最小角度的质量评估
     gmsh.model.mesh.generate(3)
 
-    mesh_save_path = save_dir / f"{theta}.msh"
+    # mesh_save_path = save_dir / f"{theta}.msh"
+    if symmetric:
+        mesh_save_path = save_dir / f"{theta}.msh"
+    else:
+        mesh_save_path = save_dir / f"{theta}_asym.msh"
     gmsh.write(str(mesh_save_path))
 
     if visualization:
@@ -160,14 +165,15 @@ def load_mesh():
 
 
 def main():
-    for theta in parameters_flat_surface.keys():
-        main_generate_mesh_flat(theta)
+    # for theta in parameters_flat_surface.keys():
+    #     main_generate_mesh_flat(theta)
 
     r_pillar = 10
-    # for theta in parameters_pillar.keys():
-    for theta in ["45", "60", "90"]:
-        main_generate_mesh_pillar(theta, r_pillar, visualization=False)
-    # main_generate_mesh_pillar()
+    for theta in parameters_pillar.keys():
+    # for theta in ["45", "60", "90"]:
+        main_generate_mesh_pillar(theta, r_pillar, symmetric=True, visualization=False)
+        main_generate_mesh_pillar(theta, r_pillar, symmetric=False, visualization=False)
+    # main_generate_mesh_pillar("90", r_pillar)
 
 
 if __name__ == "__main__":

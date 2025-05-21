@@ -12,7 +12,7 @@ import torch.optim
 import matplotlib.pyplot as plt
 from MDAnalysis.units import water
 
-from utils import *
+from utils_torch import *
 
 run_env = os.environ.get("RUN_ENVIRONMENT")
 if run_env == "mianqin_Mac":
