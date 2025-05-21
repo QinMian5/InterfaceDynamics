@@ -61,7 +61,7 @@ def submit() -> None:
         theta = job_param["THETA"]
         job_name = job_param["JOB_NAME"]
         path_dir = _path_data_dir
-        working_dir = Path("./")
+        working_dir = path_dir
         job_file_name = _replace_params("job_${SYSTEM}_${THETA}_${JOB_NAME}.sh", job_param)
         command = f"sbatch {str(path_dir / job_file_name)}"
         subprocess.run(shlex.split(command), cwd=working_dir)
