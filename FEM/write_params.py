@@ -53,7 +53,6 @@ def main():
     job_params = []
     for job in jobs:
         system, theta, job_name, extra_commands = job
-        r_box, z_box = parameters[system][theta]
         job_params.append({
             "SYSTEM": system,
             "THETA": theta,

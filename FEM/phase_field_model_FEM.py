@@ -499,15 +499,10 @@ def main():
     parser.add_argument("--lambda_0", default=None, type=float)
     parser.add_argument("--lambda_star", default=None, type=float)
     parser.add_argument("--x_offset", default=0, type=float)
-    args, remaining_args = parser.parse_known_args()
-
-    if args.system == "pillar":
-        parser.add_argument("--r_pillar", default=10,
-                            help="Pillar radius (required when system is 'pillar')")
-        parser.add_argument("--asymmetric", action="store_true")
-        args = parser.parse_args()
-    else:
-        args = parser.parse_args(remaining_args)
+    parser.add_argument("--r_pillar", default=10,
+                        help="Pillar radius (required when system is 'pillar')")
+    parser.add_argument("--asymmetric", action="store_true")
+    args = parser.parse_args()
 
     system = args.system
     theta = args.theta

@@ -2,6 +2,8 @@
 
 #SBATCH --partition=p_pamish
 #SBATCH --job-name="${SYSTEM}_${THETA}"
+#SBATCH --output="slurm_${SYSTEM}_${THETA}_${JOB_NAME}.log"
+#SBATCH --error="slurm_${SYSTEM}_${THETA}_${JOB_NAME}.error"
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=16
 #SBATCH --time=72:00:00
