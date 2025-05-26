@@ -357,6 +357,7 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
                     new_direction = 1 if current_lambda < lambda_0 else -1
                     if new_direction != direction:
                         r_step = r_step / 2
+                    direction = new_direction
                 else:
                     logger.error("Cannot find r_initial to get lambda_0")
                     raise RuntimeError("Cannot find r_initial to get lambda_0")
@@ -370,7 +371,8 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
 
     gaussian_smoother = GaussianSmoother(phi, ksi / 4, V, domain_water)
 
-    lambda_0 = compute_volume(domain_water, phi) * rho
+    if lambda_0 is None:
+        lambda_0 = compute_volume(domain_water, phi) * rho
     current_lambda_star.x.array[0] = lambda_0
 
     if lambda_star is None:
@@ -487,8 +489,8 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
 
 def main():
     parser = argparse.ArgumentParser(description="Control the program functions.")
-    parser.add_argument("--system", default="pillar", choices=["flat", "pillar"])
-    parser.add_argument("--theta", default="60")
+    parser.add_argument("--system", default="flat", choices=["flat", "pillar"])
+    parser.add_argument("--theta", default="90")
     parser.add_argument("--job_name", default="test")
     parser.add_argument("--t_eql_init", default=5000, type=float)
     parser.add_argument("--ramp_rate", default=0.25, type=float)
@@ -522,7 +524,7 @@ def main():
         raise ValueError(f"System {system} not supported")
     save_dir.mkdir(exist_ok=True, parents=True)
     main_PFM(system, theta, path_mesh, save_dir, args.t_eql_init, args.ramp_rate, args.lambda_step, args.t_eql_ramp,
-             args.t_eql_prd, args.r_initial, args.lambda_0, args.lambda_star, args.x_offset)
+             args.t_eql_prd, args.r_initial, args.lambda_0, args.lambda_star, args.x_offset, if_continue=False)
 
 
 if __name__ == "__main__":
