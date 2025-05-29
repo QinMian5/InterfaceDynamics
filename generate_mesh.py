@@ -81,13 +81,13 @@ def main_generate_mesh_flat(theta: str, visualization=False):
 
 
 parameters_pillar = {
-    "45": [70+10, 40],
-    "60": [65+10, 50],
-    "70": [55+10, 50],
-    "80": [55+10, 55],
-    "90": [55+10, 60],
-    "120": [45+10, 70],
-    "150": [45+10, 80]
+    "45": [70+20, 40],
+    "60": [65+20, 50],
+    "70": [55+20, 50],
+    "80": [55+20, 55],
+    "90": [55+20, 60],
+    "120": [45+20, 70],
+    "150": [45+20, 80]
 }
 
 
@@ -103,7 +103,7 @@ def main_generate_mesh_pillar(theta: str, r_pillar: float, symmetric=True, visua
     r_box, z_box = parameters_pillar[theta]
     z_plane = 1
     z_pillar = z_box - 1
-    x_cylinder = 0 if symmetric else r_box - r_pillar - 10
+    x_cylinder = 0 if symmetric else r_box - r_pillar - 20
 
     # Create model
     model = gmsh.model()
@@ -171,7 +171,7 @@ def main():
     r_pillar = 10
     for theta in parameters_pillar.keys():
     # for theta in ["45", "60", "90"]:
-        main_generate_mesh_pillar(theta, r_pillar, symmetric=True, visualization=False)
+    #     main_generate_mesh_pillar(theta, r_pillar, symmetric=True, visualization=False)
         main_generate_mesh_pillar(theta, r_pillar, symmetric=False, visualization=False)
     # main_generate_mesh_pillar("90", r_pillar)
 

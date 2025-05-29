@@ -134,6 +134,30 @@ def generate_interface(V, phi):
     return nodes, faces, interface_type
 
 
+def compute_interface_area(nodes, faces):
+    triangles = nodes[faces]
+
+    ab = triangles[:, 1] - triangles[:, 0]
+    ac = triangles[:, 2] - triangles[:, 0]
+    cross_products = np.cross(ab, ac)
+
+    areas = 0.5 * np.linalg.norm(cross_products, axis=1)
+    total_area = np.sum(areas)
+    return total_area
+
+
+def compute_A_iw_postprocessing(nodes, faces, interface_type):
+    A_iw = compute_interface_area(nodes, faces)
+    return A_iw
+
+
+def compute_A_is_postprocessing(domain, phi):
+    H = ufl.conditional(ufl.gt(phi, 0.5), 1.0, 0.0)
+    A_is_form = H * ufl.ds
+    A_is = compute_form(domain, A_is_form)
+    return A_is
+
+
 def export_surface(domain, facet_tags, water_surface_boundary_tag, save_dir):
     # 获取标记为 water_surface_boundary_tag 的面的拓扑信息
     water_surface_facets = facet_tags.find(water_surface_boundary_tag)
@@ -317,6 +341,7 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
     phi = fem.Function(V)
     l = fem.Function(R)
     current_lambda_star = fem.Function(R)
+    gaussian_smoother = GaussianSmoother(phi, ksi / 4, V, domain_water)
 
     if if_continue:
         with open(instantaneous_interface_save_path, "rb") as file:
@@ -334,6 +359,7 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
                     x[2] - (1 - r_initial * cos_theta)) ** 2
             condition = ufl.conditional(r_squared <= r_initial ** 2, 1.0, 0.0)
             phi.interpolate(fem.Expression(condition, V.element.interpolation_points()))
+            gaussian_smoother.step()
         else:  # Find r_initial so that lambda is close to lambda_0
             current_r = r_initial
             r_step = 2
@@ -368,8 +394,6 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
               XDMFFile(MPI.COMM_WORLD, grad_phi_xdmf_save_path, "w") as grad_phi_xdmf):
             phi_xdmf.write_mesh(domain_water)
             grad_phi_xdmf.write_mesh(domain_water)
-
-    gaussian_smoother = GaussianSmoother(phi, ksi / 4, V, domain_water)
 
     if lambda_0 is None:
         lambda_0 = compute_volume(domain_water, phi) * rho
@@ -415,9 +439,6 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
     with (XDMFFile(MPI.COMM_WORLD, phi_xdmf_save_path, "a") as phi_xdmf,
           XDMFFile(MPI.COMM_WORLD, grad_phi_xdmf_save_path, "a") as grad_phi_xdmf):
         for t in range(t_start, t_start + int(t_total) + 1):
-            if t % 100 == 0:
-                gaussian_smoother.step()
-                eliminate_small_values(phi)
             lambda_star = lambda_star_func(t)
             current_lambda_star.x.array[0] = lambda_star
             # 组装梯度
@@ -445,6 +466,9 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
                 bc.set(phi.x.array, alpha=1.0)
 
             if t % 100 == 0:
+                gaussian_smoother.step()
+                eliminate_small_values(phi)
+
                 current_lambda = compute_volume(domain_water, phi) * rho
                 logger.info(
                     f"Iteration {t}/{t_start + t_total:.0f}, lambda: {current_lambda:.0f}, lambda_star: {lambda_star:.0f}")
@@ -456,12 +480,18 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
                                                           compute_double_well_energy_surface_form(phi, gamma_iw,
                                                                                                   gamma_is_ws))
                 total_energy = surface_energy_iw + surface_energy_is_ws + double_well_energy_bulk + double_well_energy_surface
+                nodes, faces, interface_type = generate_interface(V, phi)
+                A_iw = compute_A_iw_postprocessing(nodes, faces, interface_type)
+                A_is = compute_A_is_postprocessing(domain_water, phi)
+                instantaneous_interface_dict[f"{t}"] = [nodes, faces, interface_type]
                 logger.info(
                     f"Surface Energy iw: {energy_scale * surface_energy_iw:.2f}, Surface Energy is: {energy_scale * surface_energy_is_ws:.2f}, Double Well Energy (Bulk, Surface): ({energy_scale * double_well_energy_bulk:.2f}, {energy_scale * double_well_energy_surface:.2f})")
                 info = {
                     "t": t,
                     "lambda": current_lambda,
                     "lambda_star": lambda_star,
+                    "A_iw": A_iw,
+                    "A_is": A_is,
                     "total_energy": total_energy,
                     "surface_energy_iw": surface_energy_iw,
                     "surface_energy_is_ws": surface_energy_is_ws,
@@ -473,8 +503,6 @@ def main_PFM(system, theta: str, path_mesh, save_dir, t_eql_init, ramp_rate, lam
                 # print(l.x.array, gradient_l.x.array)
                 # print(phi.x.array.min(), phi.x.array.max())
                 intermediate_result_list.append(info)
-                nodes, faces, interface_type = generate_interface(V, phi)
-                instantaneous_interface_dict[f"{t}"] = [nodes, faces, interface_type]
 
                 phi_xdmf.write_function(phi, t=t)
                 grad_phi_xdmf.write_function(grad_phi_magnitude, t=t)
@@ -492,7 +520,7 @@ def main():
     parser.add_argument("--system", default="flat", choices=["flat", "pillar"])
     parser.add_argument("--theta", default="90")
     parser.add_argument("--job_name", default="test")
-    parser.add_argument("--t_eql_init", default=5000, type=float)
+    parser.add_argument("--t_eql_init", default=10000, type=float)
     parser.add_argument("--ramp_rate", default=0.25, type=float)
     parser.add_argument("--lambda_step", default=100, type=float)
     parser.add_argument("--t_eql_ramp", default=0, type=float)
@@ -509,6 +537,15 @@ def main():
     system = args.system
     theta = args.theta
     job_name = args.job_name
+    t_eql_init = args.t_eql_init
+    ramp_rate = args.ramp_rate
+    lambda_step = args.lambda_step
+    t_eql_ramp = args.t_eql_ramp
+    t_eql_prd = args.t_eql_prd
+    r_initial = args.r_initial
+    lambda_0 = args.lambda_0
+    lambda_star = args.lambda_star
+    x_offset = args.x_offset
 
     root_dir = Path("../FEM")
     root_dir.mkdir(exist_ok=True)
@@ -523,8 +560,8 @@ def main():
     else:
         raise ValueError(f"System {system} not supported")
     save_dir.mkdir(exist_ok=True, parents=True)
-    main_PFM(system, theta, path_mesh, save_dir, args.t_eql_init, args.ramp_rate, args.lambda_step, args.t_eql_ramp,
-             args.t_eql_prd, args.r_initial, args.lambda_0, args.lambda_star, args.x_offset, if_continue=False)
+    main_PFM(system, theta, path_mesh, save_dir, t_eql_init, ramp_rate, lambda_step, t_eql_ramp,
+             t_eql_prd, r_initial, lambda_0, lambda_star, x_offset, if_continue=False)
 
 
 if __name__ == "__main__":
